@@ -1,0 +1,365 @@
+# Updated: 02/25/2025 2:55pm
+# Gather domain, DNS, port, subdomain, geolocation, SSL/TLS certificate, and HTTP header information, with recommended attacks.
+import whois
+import dns.resolver
+import nmap
+import requests
+import gradio as gr
+import time
+import socket
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import ssl
+from datetime import datetime
+import os  # Added for dynamic file path handling
+
+# Function to perform WHOIS lookup
+def whois_lookup(domain):
+    try:
+        time.sleep(2)  # Add a 2-second delay to avoid rate limiting
+        w = whois.whois(domain)
+        if not w.domain_name:  # Handle cases where WHOIS data is restricted
+            return "WHOIS data is restricted or unavailable for this domain."
+        return str(w)
+    except Exception as e:
+        return f"WHOIS lookup failed: {e}"
+
+# Function to perform DNS enumeration
+def dns_enumeration(domain):
+    record_types = ["A", "MX", "TXT", "NS"]
+    results = {}
+    for record in record_types:
+        try:
+            answers = dns.resolver.resolve(domain, record)
+            results[record] = [str(r) for r in answers]
+        except dns.resolver.NoAnswer:
+            results[record] = f"No {record} records found for this domain."
+        except dns.resolver.NXDOMAIN:
+            results[record] = f"Domain '{domain}' does not exist."
+        except Exception as e:
+            results[record] = f"Failed to resolve {record} records: {e}"
+    return results
+
+# Function to perform port scanning with full Nmap details
+def port_scan(target_ip):
+    try:
+        nm = nmap.PortScanner()
+        # Perform a detailed scan with OS detection, service version, and timing
+        nm.scan(target_ip, arguments='-p 1-1024 -sV -O --open')
+        
+        scan_results = []
+        
+        # Host status
+        for host in nm.all_hosts():
+            scan_results.append(f"=== Host: {host} ===")
+            scan_results.append(f"Status: {'Up' if nm[host].state() == 'up' else 'Down'}")
+            
+            # Port details
+            scan_results.append("\n=== Open Ports ===")
+            for proto in nm[host].all_protocols():
+                ports = nm[host][proto].keys()
+                for port in ports:
+                    port_info = nm[host][proto][port]
+                    scan_results.append(
+                        f"Port {port} ({proto}): {port_info['state']}\n"
+                        f"  Service: {port_info['name']} {port_info['product']} {port_info['version']}\n"
+                        f"  CPE: {port_info['cpe']}"
+                    )
+            
+            # OS detection
+            if 'osmatch' in nm[host]:
+                scan_results.append("\n=== OS Detection ===")
+                for osmatch in nm[host]['osmatch']:
+                    scan_results.append(f"OS: {osmatch['name']} (Accuracy: {osmatch['accuracy']}%)")
+            
+            # Scan timing
+            scan_results.append("\n=== Scan Timing ===")
+            scan_results.append(f"Scan Duration: {nm.scanstats()['elapsed']} seconds")
+        
+        return "\n".join(scan_results)
+    except Exception as e:
+        return f"Port scan failed: {e}"
+
+# Function to check a single subdomain
+def check_subdomain(subdomain):
+    try:
+        # Try both HTTP and HTTPS
+        requests.get(f"http://{subdomain}", timeout=5)
+        return subdomain
+    except requests.RequestException:
+        try:
+            requests.get(f"https://{subdomain}", timeout=5)
+            return subdomain
+        except requests.RequestException:
+            return None
+
+# Function to perform subdomain enumeration
+def subdomain_enumeration(domain):
+    subdomains = []
+    try:
+        # Get the directory of the current script
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        # Construct the full path to subdomains.txt
+        subdomain_file = os.path.join(script_dir, "subdomains.txt")
+        
+        # Load subdomain wordlist
+        with open(subdomain_file, "r") as file:
+            wordlist = file.read().splitlines()
+        
+        # Use multithreading to speed up subdomain enumeration
+        with ThreadPoolExecutor(max_workers=10) as executor:
+            futures = [executor.submit(check_subdomain, f"{word}.{domain}") for word in wordlist]
+            for future in as_completed(futures):
+                result = future.result()
+                if result:
+                    subdomains.append(result)
+        
+        return "\n".join(subdomains) if subdomains else "No subdomains found."
+    except FileNotFoundError:
+        return "Subdomain wordlist file 'subdomains.txt' not found."
+    except Exception as e:
+        return f"Subdomain enumeration failed: {e}"
+
+# Function to perform IP geolocation
+def ip_geolocation(ip):
+    try:
+        # Use ipinfo.io API to fetch geolocation data
+        response = requests.get(f"https://ipinfo.io/{ip}/json")
+        data = response.json()
+        
+        # Extract relevant information
+        location = f"""
+        IP: {data.get('ip')}
+        City: {data.get('city')}
+        Region: {data.get('region')}
+        Country: {data.get('country')}
+        ISP: {data.get('org')}
+        """
+        return location.strip()
+    except Exception as e:
+        return f"Geolocation lookup failed: {e}"
+
+# Function to perform reverse DNS lookup
+def reverse_dns_lookup(ip):
+    try:
+        domain = socket.gethostbyaddr(ip)[0]  # Perform reverse DNS lookup
+        return domain
+    except Exception as e:
+        return None
+
+# Function to perform SSL/TLS certificate analysis
+def ssl_certificate_analysis(domain):
+    try:
+        # Create a default SSL context
+        context = ssl.create_default_context()
+        
+        # Connect to the domain and fetch the certificate
+        with socket.create_connection((domain, 443)) as sock:
+            with context.wrap_socket(sock, server_hostname=domain) as ssock:
+                cert = ssock.getpeercert()
+        
+        # Extract relevant certificate details
+        issuer = dict(x[0] for x in cert['issuer'])
+        subject = dict(x[0] for x in cert['subject'])
+        valid_from = datetime.strptime(cert['notBefore'], "%b %d %H:%M:%S %Y %Z")
+        valid_to = datetime.strptime(cert['notAfter'], "%b %d %H:%M:%S %Y %Z")
+        
+        # Format the results
+        result = f"""
+        Issuer: {issuer.get('organizationName', 'Unknown')}
+        Subject: {subject.get('commonName', 'Unknown')}
+        Valid From: {valid_from}
+        Valid To: {valid_to}
+        """
+        return result.strip()
+    except Exception as e:
+        return f"SSL/TLS certificate analysis failed: {e}"
+
+# Function to perform HTTP header analysis
+def http_header_analysis(url):
+    try:
+        # Default to HTTPS if no protocol is specified
+        if not url.startswith(("http://", "https://")):
+            url = f"https://{url}"
+        
+        # Send a GET request and fetch headers
+        response = requests.get(url, timeout=10)
+        headers = response.headers
+        
+        # Analyze headers
+        header_results = []
+        header_results.append(f"URL: {url}")
+        header_results.append(f"Status Code: {response.status_code}")
+        
+        # Check for common security headers
+        security_headers = {
+            "Content-Security-Policy": "Missing",
+            "Strict-Transport-Security": "Missing",
+            "X-Content-Type-Options": "Missing",
+            "X-Frame-Options": "Missing",
+            "X-XSS-Protection": "Missing",
+        }
+        
+        # Check for variations of security headers
+        for header in security_headers:
+            if header in headers:
+                security_headers[header] = headers[header]
+            elif f"{header}-Report-Only" in headers:  # Check for report-only versions
+                security_headers[header] = headers[f"{header}-Report-Only"]
+        
+        # Add security headers to results
+        header_results.append("\n=== Security Headers ===")
+        for header, value in security_headers.items():
+            header_results.append(f"{header}: {value}")
+        
+        # Add all headers to results
+        header_results.append("\n=== All Headers ===")
+        for key, value in headers.items():
+            header_results.append(f"{key}: {value}")
+        
+        return "\n".join(header_results)
+    except Exception as e:
+        return f"HTTP header analysis failed: {e}"
+
+# Function to recommend attacks based on reconnaissance data
+def recommend_attacks(recon_data):
+    recommendations = []
+    
+    # Check for open ports and services
+    if "Port 80 (tcp)" in recon_data:
+        recommendations.append("- **Port 80 (HTTP) open**: Test for web vulnerabilities like SQL injection, XSS, or directory traversal.")
+    if "Port 443 (tcp)" in recon_data:
+        recommendations.append("- **Port 443 (HTTPS) open**: Test for SSL/TLS misconfigurations (e.g., weak ciphers, expired certificates).")
+    if "Port 22 (tcp)" in recon_data:
+        recommendations.append("- **Port 22 (SSH) open**: Attempt brute-forcing SSH credentials or test for weak key exchange algorithms.")
+    
+    # Check for specific service versions
+    if "Apache" in recon_data:
+        recommendations.append("- **Apache server detected**: Check for known vulnerabilities in the Apache version.")
+    if "OpenSSH" in recon_data:
+        recommendations.append("- **OpenSSH detected**: Test for vulnerabilities in the OpenSSH version.")
+    
+    # Check for missing security headers
+    if "Content-Security-Policy: Missing" in recon_data:
+        recommendations.append("- **Content-Security-Policy missing**: Test for XSS vulnerabilities.")
+    if "X-Frame-Options: Missing" in recon_data:
+        recommendations.append("- **X-Frame-Options missing**: Test for clickjacking attacks.")
+    if "Strict-Transport-Security: Missing" in recon_data:
+        recommendations.append("- **Strict-Transport-Security missing**: Test for SSL stripping attacks.")
+    
+    # Check for subdomains
+    if "No subdomains found." not in recon_data:
+        recommendations.append("- **Subdomains found**: Check for subdomain takeover vulnerabilities.")
+    
+    # If no specific recommendations, provide general advice
+    if not recommendations:
+        recommendations.append("- No specific recommendations. Perform a thorough manual assessment.")
+    
+    return "\n".join(recommendations)
+
+# Gradio interface
+def recon_tool(input_type, input_value):
+    results = []
+    
+    if input_type == "Domain":
+        domain = input_value
+        target_ip = None
+        
+        # WHOIS Lookup
+        results.append("=== WHOIS Lookup ===")
+        results.append(whois_lookup(domain))
+        
+        # DNS Enumeration
+        results.append("\n=== DNS Enumeration ===")
+        dns_results = dns_enumeration(domain)
+        for record, value in dns_results.items():
+            results.append(f"{record}: {value}")
+        
+        # Subdomain Enumeration
+        results.append("\n=== Subdomain Enumeration ===")
+        results.append(subdomain_enumeration(domain))
+        
+        # Resolve domain to IP for geolocation and port scanning
+        try:
+            answers = dns.resolver.resolve(domain, "A")
+            target_ip = answers[0].to_text()
+        except Exception as e:
+            results.append("\n=== IP Geolocation ===")
+            results.append(f"Failed to resolve domain to IP: {e}")
+            return "\n".join(results), "Failed to generate attack recommendations."
+        
+        # SSL/TLS Certificate Analysis
+        results.append("\n=== SSL/TLS Certificate Analysis ===")
+        results.append(ssl_certificate_analysis(domain))
+        
+        # HTTP Header Analysis
+        results.append("\n=== HTTP Header Analysis ===")
+        http_results = http_header_analysis(domain)
+        results.append(http_results)
+    
+    elif input_type == "IP Address":
+        target_ip = input_value
+        domain = reverse_dns_lookup(target_ip)
+        
+        if domain:
+            results.append("=== Reverse DNS Lookup ===")
+            results.append(f"Resolved Domain: {domain}")
+            
+            # WHOIS Lookup
+            results.append("\n=== WHOIS Lookup ===")
+            results.append(whois_lookup(domain))
+            
+            # DNS Enumeration
+            results.append("\n=== DNS Enumeration ===")
+            dns_results = dns_enumeration(domain)
+            for record, value in dns_results.items():
+                results.append(f"{record}: {value}")
+            
+            # Subdomain Enumeration
+            results.append("\n=== Subdomain Enumeration ===")
+            results.append(subdomain_enumeration(domain))
+            
+            # SSL/TLS Certificate Analysis
+            results.append("\n=== SSL/TLS Certificate Analysis ===")
+            results.append(ssl_certificate_analysis(domain))
+            
+            # HTTP Header Analysis
+            results.append("\n=== HTTP Header Analysis ===")
+            http_results = http_header_analysis(domain)
+            results.append(http_results)
+        else:
+            results.append("=== Reverse DNS Lookup ===")
+            results.append("No domain found for this IP address.")
+            return "\n".join(results), "No domain found for this IP address."
+    
+    # Port Scanning
+    results.append("\n=== Port Scan ===")
+    port_scan_results = port_scan(target_ip)
+    results.append(port_scan_results)
+    
+    # IP Geolocation
+    results.append("\n=== IP Geolocation ===")
+    results.append(ip_geolocation(target_ip))
+    
+    # Generate attack recommendations
+    recon_data = "\n".join(results)
+    attack_recommendations = recommend_attacks(recon_data)
+    
+    return "\n".join(results), attack_recommendations
+
+# Create Gradio interface
+iface = gr.Interface(
+    fn=recon_tool,
+    inputs=[
+        gr.Dropdown(choices=["Domain", "IP Address"], label="Select Input Type"),
+        gr.Textbox(label="Enter Domain or IP Address"),
+    ],
+    outputs=[
+        gr.Textbox(label="Recon Results"),
+        gr.Textbox(label="Recommended Attacks"),
+    ],
+    title="Reconnaissance Tool",
+    description="A simple reconnaissance tool to gather domain, DNS, port, subdomain, geolocation, SSL/TLS certificate, and HTTP header information, with recommended attacks.",
+)
+
+# Launch the Gradio app
+iface.launch()
