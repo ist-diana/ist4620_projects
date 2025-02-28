@@ -1,5 +1,4 @@
-# Updated: 02/25/2025 2:55pm
-# Gather domain, DNS, port, subdomain, geolocation, SSL/TLS certificate, and HTTP header information, with recommended attacks.
+#Updated 02/27/2025
 import whois
 import dns.resolver
 import nmap
@@ -10,7 +9,6 @@ import socket
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import ssl
 from datetime import datetime
-import os  # Added for dynamic file path handling
 
 # Function to perform WHOIS lookup
 def whois_lookup(domain):
@@ -39,16 +37,15 @@ def dns_enumeration(domain):
             results[record] = f"Failed to resolve {record} records: {e}"
     return results
 
-# Function to perform port scanning with full Nmap details
-def port_scan(target_ip):
+# Function to perform port scanning with full Nmap details (supports network ranges)
+def port_scan(target):
     try:
         nm = nmap.PortScanner()
         # Perform a detailed scan with OS detection, service version, and timing
-        nm.scan(target_ip, arguments='-p 1-1024 -sV -O --open')
+        nm.scan(target, arguments='-p 1-1024 -sV -O --open')
         
         scan_results = []
         
-        # Host status
         for host in nm.all_hosts():
             scan_results.append(f"=== Host: {host} ===")
             scan_results.append(f"Status: {'Up' if nm[host].state() == 'up' else 'Down'}")
@@ -96,13 +93,7 @@ def check_subdomain(subdomain):
 def subdomain_enumeration(domain):
     subdomains = []
     try:
-        # Get the directory of the current script
-        script_dir = os.path.dirname(os.path.abspath(__file__))
-        # Construct the full path to subdomains.txt
-        subdomain_file = os.path.join(script_dir, "subdomains.txt")
-        
-        # Load subdomain wordlist
-        with open(subdomain_file, "r") as file:
+        with open("subdomains.txt", "r") as file:  # Load subdomain wordlist
             wordlist = file.read().splitlines()
         
         # Use multithreading to speed up subdomain enumeration
@@ -297,48 +288,54 @@ def recon_tool(input_type, input_value):
         results.append(http_results)
     
     elif input_type == "IP Address":
-        target_ip = input_value
-        domain = reverse_dns_lookup(target_ip)
-        
-        if domain:
-            results.append("=== Reverse DNS Lookup ===")
-            results.append(f"Resolved Domain: {domain}")
-            
-            # WHOIS Lookup
-            results.append("\n=== WHOIS Lookup ===")
-            results.append(whois_lookup(domain))
-            
-            # DNS Enumeration
-            results.append("\n=== DNS Enumeration ===")
-            dns_results = dns_enumeration(domain)
-            for record, value in dns_results.items():
-                results.append(f"{record}: {value}")
-            
-            # Subdomain Enumeration
-            results.append("\n=== Subdomain Enumeration ===")
-            results.append(subdomain_enumeration(domain))
-            
-            # SSL/TLS Certificate Analysis
-            results.append("\n=== SSL/TLS Certificate Analysis ===")
-            results.append(ssl_certificate_analysis(domain))
-            
-            # HTTP Header Analysis
-            results.append("\n=== HTTP Header Analysis ===")
-            http_results = http_header_analysis(domain)
-            results.append(http_results)
+        target = input_value
+        if "/" in target:  # Check if the input is a network range
+            results.append("=== Network Range Scan ===")
+            results.append(f"Scanning network range: {target}")
         else:
-            results.append("=== Reverse DNS Lookup ===")
-            results.append("No domain found for this IP address.")
-            return "\n".join(results), "No domain found for this IP address."
+            target_ip = target
+            domain = reverse_dns_lookup(target_ip)
+            
+            if domain:
+                results.append("=== Reverse DNS Lookup ===")
+                results.append(f"Resolved Domain: {domain}")
+                
+                # WHOIS Lookup
+                results.append("\n=== WHOIS Lookup ===")
+                results.append(whois_lookup(domain))
+                
+                # DNS Enumeration
+                results.append("\n=== DNS Enumeration ===")
+                dns_results = dns_enumeration(domain)
+                for record, value in dns_results.items():
+                    results.append(f"{record}: {value}")
+                
+                # Subdomain Enumeration
+                results.append("\n=== Subdomain Enumeration ===")
+                results.append(subdomain_enumeration(domain))
+                
+                # SSL/TLS Certificate Analysis
+                results.append("\n=== SSL/TLS Certificate Analysis ===")
+                results.append(ssl_certificate_analysis(domain))
+                
+                # HTTP Header Analysis
+                results.append("\n=== HTTP Header Analysis ===")
+                http_results = http_header_analysis(domain)
+                results.append(http_results)
+            else:
+                results.append("=== Reverse DNS Lookup ===")
+                results.append("No domain found for this IP address.")
+                return "\n".join(results), "No domain found for this IP address."
     
     # Port Scanning
     results.append("\n=== Port Scan ===")
-    port_scan_results = port_scan(target_ip)
+    port_scan_results = port_scan(target if input_type == "IP Address" and "/" in input_value else target_ip)
     results.append(port_scan_results)
     
-    # IP Geolocation
-    results.append("\n=== IP Geolocation ===")
-    results.append(ip_geolocation(target_ip))
+    # IP Geolocation (only for single IPs, not ranges)
+    if input_type == "IP Address" and "/" not in input_value:
+        results.append("\n=== IP Geolocation ===")
+        results.append(ip_geolocation(target_ip))
     
     # Generate attack recommendations
     recon_data = "\n".join(results)
@@ -351,7 +348,7 @@ iface = gr.Interface(
     fn=recon_tool,
     inputs=[
         gr.Dropdown(choices=["Domain", "IP Address"], label="Select Input Type"),
-        gr.Textbox(label="Enter Domain or IP Address"),
+        gr.Textbox(label="Enter Domain, IP Address, or Network Range (e.g., 192.168.1.0/24)"),
     ],
     outputs=[
         gr.Textbox(label="Recon Results"),
