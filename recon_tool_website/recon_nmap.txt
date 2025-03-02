@@ -1,5 +1,12 @@
-#Updated 03/01/2025
-#Does not require privilege mode
+#Updated 02/27/2025
+#Works on local machine with nmmap installed
+#does not fully work on github
+#
+#Description: A simple reconnaissance tool to gather domain, DNS, port, subdomain, 
+#             geolocation, SSL/TLS certificate, and HTTP header information, with 
+#             recommended attacks.
+
+
 import whois
 import dns.resolver
 import nmap
@@ -38,12 +45,12 @@ def dns_enumeration(domain):
             results[record] = f"Failed to resolve {record} records: {e}"
     return results
 
-# Function to perform port scanning without privileged actions
+# Function to perform port scanning with full Nmap details (supports network ranges)
 def port_scan(target):
     try:
         nm = nmap.PortScanner()
-        # Perform a non-privileged TCP connect scan (-sT) without OS detection or version detection
-        nm.scan(target, arguments='-p 1-1024 -sT --open')
+        # Perform a detailed scan with OS detection, service version, and timing
+        nm.scan(target, arguments='-p 1-1024 -sV -O --open')
         
         scan_results = []
         
@@ -59,8 +66,15 @@ def port_scan(target):
                     port_info = nm[host][proto][port]
                     scan_results.append(
                         f"Port {port} ({proto}): {port_info['state']}\n"
-                        f"  Service: {port_info['name']}"
+                        f"  Service: {port_info['name']} {port_info['product']} {port_info['version']}\n"
+                        f"  CPE: {port_info['cpe']}"
                     )
+            
+            # OS detection
+            if 'osmatch' in nm[host]:
+                scan_results.append("\n=== OS Detection ===")
+                for osmatch in nm[host]['osmatch']:
+                    scan_results.append(f"OS: {osmatch['name']} (Accuracy: {osmatch['accuracy']}%)")
             
             # Scan timing
             scan_results.append("\n=== Scan Timing ===")
@@ -87,11 +101,8 @@ def check_subdomain(subdomain):
 def subdomain_enumeration(domain):
     subdomains = []
     try:
-        # Default subdomain wordlist
-        wordlist = [
-            "www", "mail", "ftp", "admin", "test", "dev", "api", "blog", 
-            "shop", "support", "web", "portal", "app", "secure", "static"
-        ]
+        with open("subdomains.txt", "r") as file:  # Load subdomain wordlist
+            wordlist = file.read().splitlines()
         
         # Use multithreading to speed up subdomain enumeration
         with ThreadPoolExecutor(max_workers=10) as executor:
@@ -102,6 +113,8 @@ def subdomain_enumeration(domain):
                     subdomains.append(result)
         
         return "\n".join(subdomains) if subdomains else "No subdomains found."
+    except FileNotFoundError:
+        return "Subdomain wordlist file 'subdomains.txt' not found."
     except Exception as e:
         return f"Subdomain enumeration failed: {e}"
 
@@ -283,48 +296,54 @@ def recon_tool(input_type, input_value):
         results.append(http_results)
     
     elif input_type == "IP Address":
-        target_ip = input_value
-        domain = reverse_dns_lookup(target_ip)
-        
-        if domain:
-            results.append("=== Reverse DNS Lookup ===")
-            results.append(f"Resolved Domain: {domain}")
-            
-            # WHOIS Lookup
-            results.append("\n=== WHOIS Lookup ===")
-            results.append(whois_lookup(domain))
-            
-            # DNS Enumeration
-            results.append("\n=== DNS Enumeration ===")
-            dns_results = dns_enumeration(domain)
-            for record, value in dns_results.items():
-                results.append(f"{record}: {value}")
-            
-            # Subdomain Enumeration
-            results.append("\n=== Subdomain Enumeration ===")
-            results.append(subdomain_enumeration(domain))
-            
-            # SSL/TLS Certificate Analysis
-            results.append("\n=== SSL/TLS Certificate Analysis ===")
-            results.append(ssl_certificate_analysis(domain))
-            
-            # HTTP Header Analysis
-            results.append("\n=== HTTP Header Analysis ===")
-            http_results = http_header_analysis(domain)
-            results.append(http_results)
+        target = input_value
+        if "/" in target:  # Check if the input is a network range
+            results.append("=== Network Range Scan ===")
+            results.append(f"Scanning network range: {target}")
         else:
-            results.append("=== Reverse DNS Lookup ===")
-            results.append("No domain found for this IP address.")
-            return "\n".join(results), "No domain found for this IP address."
+            target_ip = target
+            domain = reverse_dns_lookup(target_ip)
+            
+            if domain:
+                results.append("=== Reverse DNS Lookup ===")
+                results.append(f"Resolved Domain: {domain}")
+                
+                # WHOIS Lookup
+                results.append("\n=== WHOIS Lookup ===")
+                results.append(whois_lookup(domain))
+                
+                # DNS Enumeration
+                results.append("\n=== DNS Enumeration ===")
+                dns_results = dns_enumeration(domain)
+                for record, value in dns_results.items():
+                    results.append(f"{record}: {value}")
+                
+                # Subdomain Enumeration
+                results.append("\n=== Subdomain Enumeration ===")
+                results.append(subdomain_enumeration(domain))
+                
+                # SSL/TLS Certificate Analysis
+                results.append("\n=== SSL/TLS Certificate Analysis ===")
+                results.append(ssl_certificate_analysis(domain))
+                
+                # HTTP Header Analysis
+                results.append("\n=== HTTP Header Analysis ===")
+                http_results = http_header_analysis(domain)
+                results.append(http_results)
+            else:
+                results.append("=== Reverse DNS Lookup ===")
+                results.append("No domain found for this IP address.")
+                return "\n".join(results), "No domain found for this IP address."
     
     # Port Scanning
     results.append("\n=== Port Scan ===")
-    port_scan_results = port_scan(target_ip)
+    port_scan_results = port_scan(target if input_type == "IP Address" and "/" in input_value else target_ip)
     results.append(port_scan_results)
     
-    # IP Geolocation
-    results.append("\n=== IP Geolocation ===")
-    results.append(ip_geolocation(target_ip))
+    # IP Geolocation (only for single IPs, not ranges)
+    if input_type == "IP Address" and "/" not in input_value:
+        results.append("\n=== IP Geolocation ===")
+        results.append(ip_geolocation(target_ip))
     
     # Generate attack recommendations
     recon_data = "\n".join(results)
@@ -337,7 +356,7 @@ iface = gr.Interface(
     fn=recon_tool,
     inputs=[
         gr.Dropdown(choices=["Domain", "IP Address"], label="Select Input Type"),
-        gr.Textbox(label="Enter Domain or IP Address"),
+        gr.Textbox(label="Enter Domain, IP Address, or Network Range (e.g., 192.168.1.0/24)"),
     ],
     outputs=[
         gr.Textbox(label="Recon Results"),
